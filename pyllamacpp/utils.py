@@ -26,7 +26,7 @@ def llama_to_ggml(dir_model: str, ftype: int = 1) -> str:
     :return: ggml model path
     """
     # output in the same directory as the model
-    assert ftype in [0, 1], f"ftype should be in [0,1], 0-> f32, 1-> f16"
+    assert ftype in {0, 1}, "ftype should be in [0,1], 0-> f32, 1-> f16"
 
     fname_hparams = str((Path(dir_model) / "params.json").absolute())
     fname_tokenizer = str((Path(dir_model).parent / "tokenizer.model").absolute())
@@ -41,7 +41,7 @@ def llama_to_ggml(dir_model: str, ftype: int = 1) -> str:
         elif dim == 8192:
             return 8
         else:
-            print("Invalid dim: " + str(dim))
+            print(f"Invalid dim: {str(dim)}")
             sys.exit(1)
 
     # possible data types
@@ -75,93 +75,95 @@ def llama_to_ggml(dir_model: str, ftype: int = 1) -> str:
 
         model = torch.load(fname_model, map_location="cpu")
 
-        fout = open(fname_out, "wb")
+        with open(fname_out, "wb") as fout:
+            fout.write(struct.pack("i", 0x67676d6c))  # magic: ggml in hex
+            fout.write(struct.pack("i", hparams["vocab_size"]))
+            fout.write(struct.pack("i", hparams["dim"]))
+            fout.write(struct.pack("i", hparams["multiple_of"]))
+            fout.write(struct.pack("i", hparams["n_heads"]))
+            fout.write(struct.pack("i", hparams["n_layers"]))
+            fout.write(struct.pack("i", hparams["dim"] // hparams["n_heads"]))  # rot (obsolete)
+            fout.write(struct.pack("i", ftype))
 
-        fout.write(struct.pack("i", 0x67676d6c))  # magic: ggml in hex
-        fout.write(struct.pack("i", hparams["vocab_size"]))
-        fout.write(struct.pack("i", hparams["dim"]))
-        fout.write(struct.pack("i", hparams["multiple_of"]))
-        fout.write(struct.pack("i", hparams["n_heads"]))
-        fout.write(struct.pack("i", hparams["n_layers"]))
-        fout.write(struct.pack("i", hparams["dim"] // hparams["n_heads"]))  # rot (obsolete)
-        fout.write(struct.pack("i", ftype))
+                    # Is this correct??
+            for i in range(32000):
+                if tokenizer.is_unknown(i):
+                    # "<unk>" token (translated as ??)
+                    text = " \u2047 ".encode("utf-8")
+                    fout.write(struct.pack("i", len(text)))
+                    fout.write(text)
+                elif tokenizer.is_control(i):
+                    # "<s>"/"</s>" tokens
+                    fout.write(struct.pack("i", 0))
+                elif tokenizer.is_byte(i):
+                    # "<U+XX>" tokens (which may be invalid UTF-8)
+                    piece = tokenizer.id_to_piece(i)
+                    if len(piece) != 6:
+                        print(f"Invalid token: {piece}")
+                        sys.exit(1)
+                    byte_value = int(piece[3:-1], 16)
+                    fout.write(struct.pack("i", 1))
+                    fout.write(struct.pack("B", byte_value))
+                else:
+                    # normal token. Uses U+2581 (LOWER ONE EIGHTH BLOCK) to represent spaces.
+                    text = tokenizer.id_to_piece(i).replace("\u2581", " ").encode("utf-8")
+                    fout.write(struct.pack("i", len(text)))
+                    fout.write(text)
 
-        # Is this correct??
-        for i in range(32000):
-            if tokenizer.is_unknown(i):
-                # "<unk>" token (translated as ??)
-                text = " \u2047 ".encode("utf-8")
-                fout.write(struct.pack("i", len(text)))
-                fout.write(text)
-            elif tokenizer.is_control(i):
-                # "<s>"/"</s>" tokens
-                fout.write(struct.pack("i", 0))
-            elif tokenizer.is_byte(i):
-                # "<U+XX>" tokens (which may be invalid UTF-8)
-                piece = tokenizer.id_to_piece(i)
-                if len(piece) != 6:
-                    print("Invalid token: " + piece)
-                    sys.exit(1)
-                byte_value = int(piece[3:-1], 16)
-                fout.write(struct.pack("i", 1))
-                fout.write(struct.pack("B", byte_value))
-            else:
-                # normal token. Uses U+2581 (LOWER ONE EIGHTH BLOCK) to represent spaces.
-                text = tokenizer.id_to_piece(i).replace("\u2581", " ").encode("utf-8")
-                fout.write(struct.pack("i", len(text)))
-                fout.write(text)
+            for k, v in model.items():
+                name = k
+                shape = v.shape
 
-        for k, v in model.items():
-            name = k
-            shape = v.shape
+                # skip layers.X.attention.inner_attention.rope.freqs
+                if name[-5:] == "freqs":
+                    continue
 
-            # skip layers.X.attention.inner_attention.rope.freqs
-            if name[-5:] == "freqs":
-                continue
+                print(
+                    f"Processing variable: {name} with shape: ",
+                    shape,
+                    " and type: ",
+                    v.dtype,
+                )
 
-            print("Processing variable: " + name + " with shape: ", shape, " and type: ", v.dtype)
+                # data = tf.train.load_variable(dir_model, name).squeeze()
+                data = v.numpy().squeeze()
+                n_dims = len(data.shape);
 
-            # data = tf.train.load_variable(dir_model, name).squeeze()
-            data = v.numpy().squeeze()
-            n_dims = len(data.shape);
+                # for efficiency - transpose some matrices
+                # "model/h.*/attn/c_attn/w"
+                # "model/h.*/attn/c_proj/w"
+                # "model/h.*/mlp/c_fc/w"
+                # "model/h.*/mlp/c_proj/w"
+                # if name[-14:] == "/attn/c_attn/w" or \
+                #   name[-14:] == "/attn/c_proj/w" or \
+                #   name[-11:] == "/mlp/c_fc/w" or \
+                #   name[-13:] == "/mlp/c_proj/w":
+                #    print("  Transposing")
+                #    data = data.transpose()
 
-            # for efficiency - transpose some matrices
-            # "model/h.*/attn/c_attn/w"
-            # "model/h.*/attn/c_proj/w"
-            # "model/h.*/mlp/c_fc/w"
-            # "model/h.*/mlp/c_proj/w"
-            # if name[-14:] == "/attn/c_attn/w" or \
-            #   name[-14:] == "/attn/c_proj/w" or \
-            #   name[-11:] == "/mlp/c_fc/w" or \
-            #   name[-13:] == "/mlp/c_proj/w":
-            #    print("  Transposing")
-            #    data = data.transpose()
+                dshape = data.shape
 
-            dshape = data.shape
+                # default type is fp16
+                ftype_cur = 1
+                if ftype == 0 or n_dims == 1:
+                    print("  Converting to float32")
+                    data = data.astype(np.float32)
+                    ftype_cur = 0
 
-            # default type is fp16
-            ftype_cur = 1
-            if ftype == 0 or n_dims == 1:
-                print("  Converting to float32")
-                data = data.astype(np.float32)
-                ftype_cur = 0
+                # header
+                sname = name.encode('utf-8')
+                fout.write(struct.pack("iii", n_dims, len(sname), ftype_cur))
+                for i in range(n_dims):
+                    fout.write(struct.pack("i", dshape[n_dims - 1 - i]))
+                fout.write(sname);
 
-            # header
-            sname = name.encode('utf-8')
-            fout.write(struct.pack("iii", n_dims, len(sname), ftype_cur))
-            for i in range(n_dims):
-                fout.write(struct.pack("i", dshape[n_dims - 1 - i]))
-            fout.write(sname);
+                # data
+                data.tofile(fout)
 
-            # data
-            data.tofile(fout)
+            # I hope this deallocates the memory ..
+            model = None
 
-        # I hope this deallocates the memory ..
-        model = None
-
-        fout.close()
-
-        print("Done. Output file: " + fname_out + ", (part ", p, ")")
+        print(f"Done. Output file: {fname_out}, (part ", p, ")")
         print("")
         return fname_out
 
@@ -176,7 +178,7 @@ def quantize(ggml_model_path: str, output_model_path: str = None, itype: int = 2
     :return: quantized model path
     """
     if output_model_path is None:
-        output_model_path = ggml_model_path + f'-q4_{0 if itype == 2 else 1}.bin'
+        output_model_path = f'{ggml_model_path}-q4_{0 if itype == 2 else 1}.bin'
     logging.info("Quantization will start soon ... (This my take a while)")
     pp.llama_quantize(ggml_model_path, output_model_path, itype)
     logging.info(f"Quantized model is created successfully {output_model_path}")

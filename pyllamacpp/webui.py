@@ -33,7 +33,7 @@ def _get_key(model_name: str, config_name: str) -> str:
     :param config_name: configuration key
     :return: str key
     """
-    return model_name + '-' + config_name
+    return f'{model_name}-{config_name}'
 
 
 def _config_ui(config_name: str, key: str, config: dict):
@@ -51,7 +51,7 @@ def _config_ui(config_name: str, key: str, config: dict):
     elif config['type'] == list:
         return st.selectbox(config_name, config['options'], index=config['options'].index(config['default']),
                             help=config['description'], key=key)
-    elif config['type'] == float or config['type'] == int:
+    elif config['type'] in [float, int]:
         if config['default'] is None:
             return st.text_input(config_name, help=config['description'], key=key, value=config['default'])
         return st.number_input(label=config_name, help=config['description'], key=key, value=config['default'])
@@ -59,7 +59,6 @@ def _config_ui(config_name: str, key: str, config: dict):
         return st.checkbox(label=config_name, value=config['default'], help=config['description'], key=key)
     else:
         print(f'Warning: {config_name} does not have a supported UI')
-        pass
 
 
 def _generate_config_ui(model_name, config_schema):
@@ -86,23 +85,30 @@ def _get_config_from_session_state(model_name: str, config_schema: dict, notific
     :return: dict of configs
     """
     model_config = {}
-    for config_name in config_schema:
+    for config_name, value_ in config_schema.items():
         key = _get_key(model_name, config_name)
         try:
             value = st.session_state[key]
-            if config_schema[config_name]['type'] == str:
-                if value == 'None' or value == '':
-                    value = None
+            if (
+                value_['type'] == str
+                and value in ['None', '']
+                or config_schema[config_name]['type'] != str
+                and config_schema[config_name]['type'] == float
+                and value in ['None', '']
+                or config_schema[config_name]['type'] != str
+                and config_schema[config_name]['type'] != float
+                and config_schema[config_name]['type'] == int
+                and value in ['None', '']
+            ):
+                value = None
+            elif config_schema[config_name]['type'] == str or config_schema[
+                config_name
+            ]['type'] not in [float, int]:
+                pass
             elif config_schema[config_name]['type'] == float:
-                if value == 'None' or value == '':
-                    value = None
-                else:
-                    value = float(value)
-            elif config_schema[config_name]['type'] == int:
-                if value == 'None' or value == '':
-                    value = None
-                else:
-                    value = int(value)
+                value = float(value)
+            else:
+                value = int(value)
 
             model_config[config_name] = value
         except KeyError as e:
@@ -124,8 +130,7 @@ def _create_model(ggml_model: str, n_ctx: int):
 
     :return: llama.cpp model
     """
-    model = Model(ggml_model=ggml_model, n_ctx=n_ctx)
-    return model
+    return Model(ggml_model=ggml_model, n_ctx=n_ctx)
 
 
 footer = """
@@ -193,7 +198,7 @@ def webui() -> None:
                        layout="wide",
                        initial_sidebar_state='auto')
 
-    st.markdown(f"# PyLLaMaCpp :llama:")
+    st.markdown("# PyLLaMaCpp :llama:")
     st.markdown(
         "#### A simple Web UI for [llama.cpp](https://github.com/ggerganov/llama.cpp) Python [bindings]("
         "https://github.com/abdeladim-s/pyllamacpp)")
@@ -209,10 +214,7 @@ def webui() -> None:
             llama_model_dir = st.text_input('LLaMa Model directory', help='Absolute path of the LLaMa model directory')
             quantize = st.checkbox("Quantize", help="Quantization reduces the model size while keeping it accurate",
                                    value=True)
-            # if quantize:
-            #     quantization_type = st.selectbox("Qnatization type", options=['Q4_0', 'Q4_1'])
-            convert_button = st.button("Convert")
-            if convert_button:
+            if convert_button := st.button("Convert"):
                 with st.spinner("Processing (This may take a while) ..."):
                     st.session_state['ggml_model_path'] = utils.llama_to_ggml(llama_model_dir)
                     if quantize:
@@ -221,8 +223,7 @@ def webui() -> None:
         with st.expander('Load Model', expanded=True):
             ggml_model_path = st.text_input("ggml model path", value=st.session_state['ggml_model_path'])
             n_ctx = st.number_input("n_ctx", help="The maximum number of tokens of the prompt", value=512)
-            load_button = st.button("Load")
-            if load_button:
+            if load_button := st.button("Load"):
                 st.session_state['model'] = _create_model(ggml_model_path, n_ctx)
                 st.session_state['generate_button_disabled'] = False
 

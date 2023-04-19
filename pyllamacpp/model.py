@@ -118,12 +118,11 @@ class Model:
         Returns a `dict` representation of the params
         :return: params dict
         """
-        res = {}
-        for param in dir(params):
-            if param.startswith('__'):
-                continue
-            res[param] = getattr(params, param)
-        return res
+        return {
+            param: getattr(params, param)
+            for param in dir(params)
+            if not param.startswith('__')
+        }
 
     @staticmethod
     def get_params_schema() -> dict:
